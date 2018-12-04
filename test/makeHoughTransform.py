@@ -8,6 +8,7 @@ import os, re, ROOT, sys, pickle, time
 from pprint import pprint
 from math import *
 from array import array
+from ctypes import *
 from DataFormats.FWLite import Events, Handle
 import numpy as np
 
@@ -70,17 +71,39 @@ def print_canvas(canvas, output_name_without_extention, path):
     canvas.Print("%s/%s.pdf"%(path,output_name_without_extention))
     canvas.Print("%s/%s.root"%(path,output_name_without_extention))
 
+def getHitPosition(sl,l):
+    wirepos_z = [0., 1.3, 2.6, 3.9, 99999., 99999., 99999., 99999., 23.8, 25.1, 26.4, 27.7]  # in mc
+    index = (int(sl)-1)*4 + (int(l)-1) # Index for a given SL and layer
+    
+    return wirepos_z[index]
+
+def getLRHitPosition(sl,l,pos,lr,wire): 
+    wirepos_x = [-95.0142, -97.1103, -95.0094, -97.1046, 113.4, 115.5, 113.4, 115.5,-97.0756,-99.1991,-97.0935,-99.1933 ]
+    
+    index = (int(sl)-1)*4 + (int(l)-1) # Index for a given SL and layer
+    cellLength     = 4.2  #  The length of a cell
+    cellSemiLength = 2.1  # length from the wire to the end of the cell
+    chamberLength  = 210.  # The length of the whole chamber
+
+    vdrift = 0.000545  #cm/ns    
+    relativeChamberPosition = (pos - wirepos_x[index]) + chamberLength + 1.35;
+    relativeCellPosition    = math.fmod(relativeChamberPosition, cellLength);
+    positionInCell          = relativeCellPosition - cellSemiLength;
+    
+    return pos,pos+math.pow(-1,lr)*2*abs(positionInCell)
+    
 def getWirePosition(sl, l, wire): 
     ##Numbers for MB2
     wirepos_z = [0., 1.3, 2.6, 3.9, 99999., 99999., 99999., 99999., 23.8, 25.1, 26.4, 27.7]  # in mc
-    wirepos_x = [0.0, -2.0961, 0.0048, -2.0904, 99999., 99999., 99999., 99999., -2.0614, -4.1849, -2.0793, -4.1791] # in cm (relative to wire 1)
-
-
-    index = (sl-1)*4 + (l-1) # Index for a given SL and layer
+    wirepos_x = [-95.0142, -97.1103, -95.0094, -97.1046, 113.4, 115.5, 113.4, 115.5,-97.0756,-99.1991,-97.0935,-99.1933 ]
+##    wirepos_x = [0.0, -2.0961, 0.0048, -2.0904, 99999., 99999., 99999., 99999., -2.0614, -4.1849, -2.0793, -4.1791] # in cm (relative to wire 1)
+    
+    index = (int(sl)-1)*4 + (int(l)-1) # Index for a given SL and layer
     cellLength     = 4.2  #  The length of a cell
     cellSemiLength = 2.1  # length from the wire to the end of the cell
 #    chamberLength  = 210  # The length of the whole chamber
-
+    
+    
     x = wirepos_x[index] + wire*cellLength
     return x, wirepos_z[index]
 
@@ -113,7 +136,25 @@ def makeHoughTransform(occupancy):
         
     return linespace
         
+
+def findBestSegment(linespace):
+    ## this function goes back to point-space (for now only one)
+    locx = c_int(0)
+    locy = c_int(0)
+    locz = c_int(0)
+    maxbin = linespace.GetMaximumBin(locx,locy,locz) 
+
     
+    theta_err = linespace.GetXaxis().GetBinLowEdge(locx.value)
+    rho_err   = linespace.GetYaxis().GetBinLowEdge(locy.value)
+    theta_pos = linespace.GetXaxis().GetBinCenter(locx.value)
+    rho_pos   = linespace.GetYaxis().GetBinCenter(locy.value)
+    
+    m = -1./math.tan(theta_pos)
+    n = rho_pos/math.sin(theta_pos)
+
+    return m,n
+
 def run(inputfile):
     print "Processing " 
     
@@ -134,17 +175,43 @@ def run(inputfile):
         
         nhits = 0
         if filled: break 
-        for i in range(len(event.digi_wheel)):
-            if (event.digi_wheel[i]!=0): continue
-            if (event.digi_station[i]!=2): continue
-            if (event.digi_sl[i]==2):  continue
-            
-            (x1,x2,z) = getDigiPosition(event.digi_sl[i],event.digi_layer[i],event.digi_wire[i],event.digi_time[i])                                  
-            
-            occupancy.SetPoint(nhits,x1,z) 
-            occupancy.SetPoint(nhits+1,x2,z)
-            nhits += 2
-        
+        for i in range(len(event.dtsegm4D_wheel)):
+            if (event.dtsegm4D_wheel[i]!=0): continue
+            if (event.dtsegm4D_station[i]!=2): continue
+            for idtsegments in range(event.dtsegm4D_phinhits[i]): 
+                 if (event.dtsegm4D_phi_hitsSuperLayer[i][idtsegments]==2): continue
+###SF                 print "dtsegm4D_phi_hitsPos %f" %(event.dtsegm4D_phi_hitsPos[i][idtsegments])   
+###SF                 print "dtsegm4D_phi_hitsPosCh %f" %(event.dtsegm4D_phi_hitsPosCh[i][idtsegments]) 
+###SF                 print "dtsegm4D_phi_hitsPosErr %f" %(event.dtsegm4D_phi_hitsPosErr[i][idtsegments])
+###SF                 print "dtsegm4D_phi_hitsSide %f" %(event.dtsegm4D_phi_hitsSide[i][idtsegments])  
+###SF                 print "dtsegm4D_phi_hitsWire %f" %(event.dtsegm4D_phi_hitsWire[i][idtsegments])  
+###SF                 print "dtsegm4D_phi_hitsLayer %f" %(event.dtsegm4D_phi_hitsLayer[i][idtsegments])  
+###SF                 print "dtsegm4D_phi_hitsSuperLayer %f" %(event.dtsegm4D_phi_hitsSuperLayer[i][idtsegments]) 
+###SF                 print "dtsegm4D_phi_hitsTime %f" %(event.dtsegm4D_phi_hitsTime[i][idtsegments]) 
+###SF                 print "dtsegm4D_phi_hitsTimeCali %f" %(event.dtsegm4D_phi_hitsTimeCali[i][idtsegments]) 
+                 
+                 z = getHitPosition(event.dtsegm4D_phi_hitsSuperLayer[i][idtsegments],event.dtsegm4D_phi_hitsLayer[i][idtsegments])
+
+                 (x1,x2) = getLRHitPosition(event.dtsegm4D_phi_hitsSuperLayer[i][idtsegments],event.dtsegm4D_phi_hitsLayer[i][idtsegments],
+                                            event.dtsegm4D_phi_hitsPos[i][idtsegments],event.dtsegm4D_phi_hitsSide[i][idtsegments],
+                                            event.dtsegm4D_phi_hitsWire[i][idtsegments])
+                 
+                 occupancy.SetPoint(nhits,x1,z) 
+                 occupancy.SetPoint(nhits+1,x2,z) 
+                 nhits += 2
+ 
+##        for i in range(len(event.digi_wheel)):
+##            if (event.digi_wheel[i]!=0): continue
+##            if (event.digi_station[i]!=2): continue
+##            if (event.digi_sl[i]==2):  continue
+##            
+##            (x1,x2,z) = getDigiPosition(event.digi_sl[i],event.digi_layer[i],event.digi_wire[i],event.digi_time[i])                                  
+##            
+##            print "digi pos: %f or %f"    %(x1,x2)
+##            print "digi z: %f"      %(z)
+##            print "digi time: %f"   %(event.digi_time[i])
+
+       
         ## if enough
         if nhits > 20: 
             filled=True
@@ -169,7 +236,7 @@ def run(inputfile):
     occupancy.Draw("AP")
 
     
-    path="/afs/cern.ch/user/f/folguera/www/private/L1TPhase2/DTwithHT/"
+    path="/afs/cern.ch/user/f/folguera/www/private/L1TPhase2/DTwithHT_withRecHits1D/"
     print_canvas(c1,"Occupancy_MB2_Wh0",path)
     
     ## now make HT 
@@ -178,13 +245,21 @@ def run(inputfile):
     c2.SetLeftMargin(0.15)
     
     linespace.SetTitle("Linespace")
-    linespace.GetXaxis().SetTitle("phi (rad)")
-    linespace.GetYaxis().SetTitle("rho (cm)")
+    linespace.GetXaxis().SetTitle("#theta (rad)")
+    linespace.GetYaxis().SetTitle("#rho (cm)")
     linespace.Draw("COLZ")
     print_canvas(c2,"HoughTransform_MB2_Wh0",path)
 
     ## Now try to find segments
-    findSegments(linespace)    
+    (m,n) = findBestSegment(linespace)    
+    
+    segm = ROOT.TF1("seg","[0]*x+[1]",-150,150)
+    segm.SetParameters(m,n)
+    c1.cd()
+    segm.SetLineColor(ROOT.kRed)
+    segm.SetLineWidth(2)
+    segm.Draw("SAME")
+    print_canvas(c1,"Occupancy_MB2_Wh0_fit",path)
     
 
 
@@ -207,3 +282,5 @@ if __name__ == "__main__":
     run(inputfile)
     
     print "DONE"
+
+#  LocalWords:  dtsegm
