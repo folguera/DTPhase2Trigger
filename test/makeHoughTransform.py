@@ -4,28 +4,29 @@
 # PyROOT study of DT local reco
 # using a Hough Transform
 #
-import os, re, ROOT, sys, pickle, time
+import os, re, sys, pickle, time, argparse, math
+
 from pprint import pprint
-from math import *
+import ROOT as r
 from array import array
 from ctypes import *
 from DataFormats.FWLite import Events, Handle
 import numpy as np
+import warnings as wr
 
-
-# import ROOT in batch mode
-import sys
-import argparse
-import math
 
 oldargv = sys.argv[:]
 sys.argv = [ '-b-' ]
 
-ROOT.gROOT.SetBatch(True)
-ROOT.gStyle.SetOptStat(0)
+r.gROOT.SetBatch(True)
+r.gStyle.SetOptStat(0)
 sys.argv = oldargv
 
 ZPOS = [0., 1.3, 2.6, 3.9, 23.8, 25.1, 26.4, 27.7]  # in cm
+# FOR MB2:
+wirepos_x = [-95.0142, -97.1103, -95.0094, -97.1046, 113.4, 115.5, 113.4, 115.5, -97.0756, -99.1991, -97.0935, -99.1933]
+# wirepos_x = [0.0, -2.0961, 0.0048, -2.0904, 99999., 99999., 99999., 99999., -2.0614, -4.1849, -2.0793, -4.1791] # in cm (relative to wire 1)
+wirepos_z = [0., 1.3, 2.6, 3.9, 99999., 99999., 99999., 99999., 23.8, 25.1, 26.4, 27.7]  # in cm
 
 YCELLSIZE = 13.  # in mm
 XCELLSIZE = 40.  # in mm, 50 cells for MB1
@@ -36,19 +37,23 @@ YMAX = 290  # in mm
 NYBINS = 23 # each cell own bin, middle empty
 NXBINS = 8000
 
+cellLength     = 4.2  #  The length of a cell
+cellSemiLength = cellLength/2  # length from the wire to the end of the cell
+cellQuarterLength = cellSemiLength/2  # length from the wire to the middle of space between the border and the wire
+chamberLength  = 210.  # The length of the whole chamber
+
+vdrift = 0.000545  #cm/ns
+
 ### other global variables:
 n_events_limit=10000
 doFanae = False
-
-
-
 
 
 ##def generateSignal(nmuons, eff):
 ##    ## x-y pairs
 ##    hits = {}
 ##        
-##    line = ROOT.TF1("line","pol1",0,1990) # in mm
+##    line = r.TF1("line","pol1",0,1990) # in mm
 ##    ## restrict phi bending to +/- pi/8
 ##
 ###    for y in YPOS:
@@ -88,57 +93,37 @@ class TransformHelper:
 
 
     def getHitPosition(self, sl,l):
-        wirepos_z = [0., 1.3, 2.6, 3.9, 99999., 99999., 99999., 99999., 23.8, 25.1, 26.4, 27.7]  # in mc
-        index = (int(sl)-1)*4 + (int(l)-1) # Index for a given SL and layer
-        
+        index     = (int(sl)-1)*4 + (int(l)-1) # Index for a given SL and layer
         return wirepos_z[index]
 
 
-    def getLRHitPosition(self, sl,l,pos,lr,wire):
-        wirepos_x = [-95.0142, -97.1103, -95.0094, -97.1046, 113.4, 115.5, 113.4, 115.5,-97.0756,-99.1991,-97.0935,-99.1933 ]
-        
+    def getLRHitPosition(self, sl, l, pos, lr, wire):        
         index = (int(sl)-1)*4 + (int(l)-1) # Index for a given SL and layer
-        cellLength     = 4.2  #  The length of a cell
-        cellSemiLength = 2.1  # length from the wire to the end of the cell
-        chamberLength  = 210.  # The length of the whole chamber
-
-        vdrift = 0.000545  #cm/ns
         relativeChamberPosition = (pos - wirepos_x[index]) + chamberLength + 1.35;
         relativeCellPosition    = math.fmod(relativeChamberPosition, cellLength);
-        positionInCell          = relativeCellPosition - cellSemiLength;
-        
-        return pos, pos + math.pow(-1, lr) * 2 * abs(positionInCell)
+        positionInCell          = relativeCellPosition - cellQuarterLength;
+        #return pos, pos + math.pow(-1, lr) * 2 * abs(positionInCell)
+        return pos, pos + math.pow(-1, lr) * cellSemiLength
 
 
     def getWirePosition(self, sl, l, wire):
-        ##Numbers for MB2
-        wirepos_z = [0., 1.3, 2.6, 3.9, 99999., 99999., 99999., 99999., 23.8, 25.1, 26.4, 27.7]  # in mc
-        wirepos_x = [-95.0142, -97.1103, -95.0094, -97.1046, 113.4, 115.5, 113.4, 115.5,-97.0756,-99.1991,-97.0935,-99.1933 ]
-    ##    wirepos_x = [0.0, -2.0961, 0.0048, -2.0904, 99999., 99999., 99999., 99999., -2.0614, -4.1849, -2.0793, -4.1791] # in cm (relative to wire 1)
-        
         index = (int(sl)-1)*4 + (int(l)-1) # Index for a given SL and layer
-        cellLength     = 4.2  #  The length of a cell
-        cellSemiLength = 2.1  # length from the wire to the end of the cell
-    #    chamberLength  = 210  # The length of the whole chamber
-        
         x = wirepos_x[index] + wire*cellLength
         return x, wirepos_z[index]
 
 
     def getDigiPosition(self, sl,l,wire,dtime):
-        vdrift = 0.000545  #cm/ns
         posInCell = dtime*vdrift
         (xwire, zwire) = getWirePosition(sl,l,wire)
-
         return xwire-posInCell,xwire+posInCell,zwire
 
 
     def makeHoughTransform(self, occupancy):
-        linespace = ROOT.TH2D("linespace","linespace", 3600, 0, 2*math.pi, 500, -250., 250.)
+        linespace = r.TH2D("linespace", "linespace", 3600, 0, 2*math.pi, 500, -250., 250.)
         
         ## loop over the occupancy (left-right)
-        x = ROOT.Double(0.)
-        z = ROOT.Double(0.)
+        x = r.Double(0.)
+        z = r.Double(0.)
         rho = 0.
         phi = 0.
         
@@ -146,10 +131,10 @@ class TransformHelper:
             occupancy.GetPoint(i,x,z)
             
             phi = 0.
-            while phi<2*math.pi: 
+            while phi < 2*math.pi:
                 rho = x*math.cos(phi)+z*math.sin(phi)
                 linespace.Fill(phi,rho)
-                phi = phi + 0.001 
+                phi = phi + 0.001
             
         return linespace
 
@@ -175,30 +160,42 @@ class TransformHelper:
         return m,n
 
 
-    def run(self):
+    def run(self, mb = 2, wh = 0, se = -1):
         print "> Beginning to process..."
+        if (mb <= 0) or (mb > 4):  mb = -1
+        if (wh < -2) or (wh > +2): wh = -3
+        if (se <= 0) or (se > 14): se = -1
+        txtwh = str(wh)*(wh != -3) + "ALL"*(wh == -3)
+        txtmb = str(mb)*(mb != -1) + "ALL"*(mb == -1)
+        txtse = str(se)*(se != -1) + "ALL"*(se == -1)
         
-        occupancy   = ROOT.TGraph()
-        linespace   = ROOT.TH2D()
-        linespace1D = ROOT.TH1D()
+        print "> Processing for wheel", txtwh + ",", "sector", txtse + ",", "and chamber", txtmb + "."
         
-        f = ROOT.TFile.Open(self.inputfile)
+        occupancy   = r.TGraph()  # Geometrical plot: it will be the direct (or point) space plot.
+        linespace   = r.TH2D()    # Dual (or line) space plot.
+        linespace1D = r.TH1D()
+        
+        f = r.TFile.Open(self.inputfile)
         
         ## Loop over the events:
-        nevents=0
-        filled=False
+        nevents = 0
+        filled  = False
         for event in f.Get("DTTree"):
-            nevents += 1
-            if n_events_limit and nevents>=n_events_limit: break
-            if (nevents+1)%10000==0: print "Event: ",nevents+1
+            # We produce an artificial event taking segment info from various chambers and/or sectors and/or wheels until 20 hits are collected.
+            if filled: break
             
-            nhits = 0
-            if filled: break 
-            for i in range(len(event.dtsegm4D_wheel)):
-                if (event.dtsegm4D_wheel[i]!=0): continue
-                if (event.dtsegm4D_station[i]!=2): continue
+            nevents += 1
+            if n_events_limit and nevents >= n_events_limit: break
+            if (nevents + 1)%10000 == 0: print "Event: ", nevents+1
+            
+            nhits = 0; nsegs = 0;
+            
+            for i in range(len(event.dtsegm4D_wheel)):                               # i := segment index
+                if (event.dtsegm4D_wheel[i]   != wh and wh != -3): continue
+                if (event.dtsegm4D_station[i] != mb and mb != -1): continue
+                if (event.dtsegm4D_sector[i]  != se and se != -1): continue
                 for idtsegments in range(event.dtsegm4D_phinhits[i]):
-                    if (event.dtsegm4D_phi_hitsSuperLayer[i][idtsegments]==2): continue
+                    if (event.dtsegm4D_phi_hitsSuperLayer[i][idtsegments] == 2): continue # we demand that more than two hits per segment coincide
     ###SF                 print "dtsegm4D_phi_hitsPos %f" %(event.dtsegm4D_phi_hitsPos[i][idtsegments])
     ###SF                 print "dtsegm4D_phi_hitsPosCh %f" %(event.dtsegm4D_phi_hitsPosCh[i][idtsegments])
     ###SF                 print "dtsegm4D_phi_hitsPosErr %f" %(event.dtsegm4D_phi_hitsPosErr[i][idtsegments])
@@ -209,15 +206,20 @@ class TransformHelper:
     ###SF                 print "dtsegm4D_phi_hitsTime %f" %(event.dtsegm4D_phi_hitsTime[i][idtsegments])
     ###SF                 print "dtsegm4D_phi_hitsTimeCali %f" %(event.dtsegm4D_phi_hitsTimeCali[i][idtsegments])
                     
-                    z = self.getHitPosition(event.dtsegm4D_phi_hitsSuperLayer[i][idtsegments],event.dtsegm4D_phi_hitsLayer[i][idtsegments])
+                    z        = self.getHitPosition(event.dtsegm4D_phi_hitsSuperLayer[i][idtsegments], event.dtsegm4D_phi_hitsLayer[i][idtsegments])
 
-                    (x1,x2) = self.getLRHitPosition(event.dtsegm4D_phi_hitsSuperLayer[i][idtsegments],event.dtsegm4D_phi_hitsLayer[i][idtsegments],
-                                                    event.dtsegm4D_phi_hitsPos[i][idtsegments],event.dtsegm4D_phi_hitsSide[i][idtsegments],
-                                                    event.dtsegm4D_phi_hitsWire[i][idtsegments])
+                    (x1, x2) = self.getLRHitPosition(event.dtsegm4D_phi_hitsSuperLayer[i][idtsegments],event.dtsegm4D_phi_hitsLayer[i][idtsegments],
+                                                     event.dtsegm4D_phi_hitsPos[i][idtsegments], event.dtsegm4D_phi_hitsSide[i][idtsegments],
+                                                     event.dtsegm4D_phi_hitsWire[i][idtsegments])
                     
-                    occupancy.SetPoint(nhits,x1,z)
-                    occupancy.SetPoint(nhits+1,x2,z)
+                    #print "lodelao:", event.dtsegm4D_phi_hitsSide[i][idtsegments]
+                    #print "\nx1", x1, "x2:", x2
+                    #print "resta:", abs(x1-x2), "\n"
+                    
+                    occupancy.SetPoint(nhits,     x1, z)
+                    occupancy.SetPoint(nhits + 1, x2, z)
                     nhits += 2
+                    nsegs += 1
 
     ##        for i in range(len(event.digi_wheel)):
     ##            if (event.digi_wheel[i]!=0): continue
@@ -236,45 +238,50 @@ class TransformHelper:
             else:
                 for hit in range(nhits):
                     occupancy.RemovePoint(hit)
-
+        
+        if not filled: wr.warn("> Not filled properly!", UserWarning, stacklevel=2)
+        print "> Number of hits plotted:", nhits
+        print "> Number of segments selected:", nsegs
+        
         ## Now Draw and save TGraph
-        c1 = ROOT.TCanvas("c1", "Occupancy",700,700)
+        c1 = r.TCanvas("c1", "Occupancy", 700, 700)
         c1.SetLeftMargin(0.15)
         
         occupancy.SetTitle("x-z hits")
-        occupancy.SetMarkerColor(ROOT.kBlack)
+        occupancy.SetMarkerColor(r.kBlack)
         occupancy.SetMinimum(-2)
         occupancy.SetMaximum(30)
         occupancy.SetMarkerStyle(5)
         occupancy.SetMarkerSize(1)
         occupancy.GetXaxis().SetRange(0, 250)
+        occupancy.GetXaxis().SetLimits(-140, 80)
         occupancy.GetXaxis().SetTitle("x coordinate (in cm)")
         occupancy.GetYaxis().SetTitle("z coordinate (in cm)")
         occupancy.Draw("AP")
 
-        self.print_canvas(c1, "Occupancy_MB2_Wh0")
+        self.print_canvas(c1, "Occupancy_MB{c}_Wh{w}_S{s}".format(c = txtmb, w = txtwh, s = txtse))
         
         ## now make HT
         linespace = self.makeHoughTransform(occupancy)
-        c2 = ROOT.TCanvas("c2", "HT",700,700)
+        c2 = r.TCanvas("c2", "HT", 700, 700)
         c2.SetLeftMargin(0.15)
         
         linespace.SetTitle("Linespace")
         linespace.GetXaxis().SetTitle("#theta (rad)")
         linespace.GetYaxis().SetTitle("#rho (cm)")
         linespace.Draw("COLZ")
-        self.print_canvas(c2,"HoughTransform_MB2_Wh0")
+        self.print_canvas(c2, "HoughTransform_MB{c}_Wh{w}_S{s}".format(c = txtmb, w = txtwh, s = txtse))
 
         ## Now try to find segments
         (m,n) = self.findBestSegment(linespace)
         
-        segm = ROOT.TF1("seg","[0]*x+[1]",-150,150)
+        segm = r.TF1("seg", "[0]*x+[1]", -150, 150)
         segm.SetParameters(m,n)
         c1.cd()
-        segm.SetLineColor(ROOT.kRed)
+        segm.SetLineColor(r.kRed)
         segm.SetLineWidth(2)
         segm.Draw("SAME")
-        self.print_canvas(c1,"Occupancy_MB2_Wh0_fit")
+        self.print_canvas(c1, "Occupancy_MB{c}_Wh{w}_S{s}_fit".format(c = txtmb, w = txtwh, s = txtse))
         f.Close()
         return
 
@@ -283,7 +290,6 @@ class TransformHelper:
 ### ========= MAIN =======================
 if __name__ == "__main__":
     print "> Beginning to study DTntuples!"
-    import argparse
     parser = argparse.ArgumentParser(usage = "MakeHoughTransform.py [options]",
                                      description="Dummy test on Hough transform",
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -301,8 +307,9 @@ if __name__ == "__main__":
     hlpr = TransformHelper(inputfile)
     if not inFanae: hlpr.path = "/afs/cern.ch/user/f/folguera/www/private/L1TPhase2/DTwithHT_withRecHits1D/"
     else:           hlpr.path = "/nfs/fanae/user/vrbouza/www/Proyectos/trigger_primitives/results/houghtrans/"
-    hlpr.run()
+    hlpr.run(se=4, wh=-1)
+    #hlpr.run()
     
-    print "> Done!"
+    print "> Done!\n"
 
 #  LocalWords:  dtsegm
