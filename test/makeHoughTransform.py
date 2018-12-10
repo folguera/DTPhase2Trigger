@@ -4,7 +4,7 @@
 # PyROOT study of DT local reco
 # using a Hough Transform
 #
-import os, re, sys, pickle, time, argparse, math
+import os, re, sys, pickle, time, argparse, math, copy
 
 from pprint import pprint
 import ROOT as r
@@ -45,8 +45,8 @@ chamberLength  = 210.  # The length of the whole chamber
 vdrift = 0.000545  #cm/ns
 
 ### other global variables:
-n_events_limit=10000
-doFanae = False
+n_events_limit = 20000
+doFanae        = False
 
 
 ##def generateSignal(nmuons, eff):
@@ -82,6 +82,10 @@ class TransformHelper:
     def __init__(self, sourcefile = ""):
         self.inputfile = sourcefile
         self.path      = ""
+        self.binsangle = 3600
+        self.binsrho   = 500
+        self.doVarious = False
+        self.nhits     = 20
 
 
     def print_canvas(self, canvas, output_name_without_extention):
@@ -97,13 +101,12 @@ class TransformHelper:
         return wirepos_z[index]
 
 
-    def getLRHitPosition(self, sl, l, pos, lr, wire):        
+    def getLRHitPosition(self, sl, l, pos, lr, wire):
         index = (int(sl)-1)*4 + (int(l)-1) # Index for a given SL and layer
         relativeChamberPosition = (pos - wirepos_x[index]) + chamberLength + 1.35;
         relativeCellPosition    = math.fmod(relativeChamberPosition, cellLength);
-        positionInCell          = relativeCellPosition - cellQuarterLength;
-        #return pos, pos + math.pow(-1, lr) * 2 * abs(positionInCell)
-        return pos, pos + math.pow(-1, lr) * cellSemiLength
+        positionInCell          = relativeCellPosition - cellSemiLength;
+        return pos, pos + math.pow(-1, lr) * 2 * abs(positionInCell)
 
 
     def getWirePosition(self, sl, l, wire):
@@ -119,7 +122,7 @@ class TransformHelper:
 
 
     def makeHoughTransform(self, occupancy):
-        linespace = r.TH2D("linespace", "linespace", 3600, 0, 2*math.pi, 500, -250., 250.)
+        linespace = r.TH2D("linespace", "linespace", self.binsangle, 0, 2*math.pi, self.binsrho, -250., 250.)
         
         ## loop over the occupancy (left-right)
         x = r.Double(0.)
@@ -139,12 +142,44 @@ class TransformHelper:
         return linespace
 
 
+    def findLocalMaxima(self, histo2D):
+        maxima = []; maximaerr = []; # maximaerr still not implemented
+        spc    = r.TSpectrum2()
+        
+        spc.Search(histo2D, 5, "noMarkov", 0.55)
+        #print histo2D.ShowPeaks(1, "noMarkov", 0.8)
+        
+        npks = spc.GetNPeaks()
+        if npks == 0: raise RuntimeError("We have not found any peak.")
+        else:         print "\n> Number of found peaks:", npks
+        posx = spc.GetPositionX(); posy = spc.GetPositionY()
+        posx.SetSize(npks); posy.SetSize(npks);
+        lx = list(posx); ly = list(posy);
+        for i in range(npks):
+            xtemp = c_int(0); ytemp = c_int(0); ztemp = c_int(0);
+            histo2D.GetBinXYZ(histo2D.FindBin(lx[i], ly[i], 0), xtemp, ytemp, ztemp)
+            theta_err = histo2D.GetXaxis().GetBinLowEdge(xtemp.value)
+            rho_err   = histo2D.GetYaxis().GetBinLowEdge(ytemp.value)
+            theta_pos = histo2D.GetXaxis().GetBinCenter(xtemp.value)
+            rho_pos   = histo2D.GetYaxis().GetBinCenter(ytemp.value)
+            
+            if (abs(theta_pos - math.pi/2) < 0.2) or (abs(theta_pos - math.pi*3/2) < 0.2): continue
+            
+            m = -1. / math.tan(theta_pos)
+            n = rho_pos / math.sin(theta_pos)
+            maxima.append((m, n))
+            #maximaerr.append((m, n))
+        
+        print "> Number of accepted peaks:", len(maxima)
+        return maxima, maximaerr
+
+
     def findBestSegment(self, linespace):
         ## this function goes back to point-space (for now only one)
         locx = c_int(0)
         locy = c_int(0)
         locz = c_int(0)
-        maxbin = linespace.GetMaximumBin(locx,locy,locz)
+        linespace.GetMaximumBin(locx, locy, locz)
 
         
         theta_err = linespace.GetXaxis().GetBinLowEdge(locx.value)
@@ -172,6 +207,7 @@ class TransformHelper:
         print "> Processing for wheel", txtwh + ",", "sector", txtse + ",", "and chamber", txtmb + "."
         
         occupancy   = r.TGraph()  # Geometrical plot: it will be the direct (or point) space plot.
+        actualocc   = r.TGraph()  # Geometrical plot: it will be the direct (or point) space plot.
         linespace   = r.TH2D()    # Dual (or line) space plot.
         linespace1D = r.TH1D()
         
@@ -186,9 +222,9 @@ class TransformHelper:
             
             nevents += 1
             if n_events_limit and nevents >= n_events_limit: break
-            if (nevents + 1)%10000 == 0: print "Event: ", nevents+1
+            if (nevents + 1)%1000 == 0: print "Event: ", nevents+1
             
-            nhits = 0; nsegs = 0;
+            nhits = 0; nsegs = 0; actualhits = 0;
             
             for i in range(len(event.dtsegm4D_wheel)):                               # i := segment index
                 if (event.dtsegm4D_wheel[i]   != wh and wh != -3): continue
@@ -217,10 +253,12 @@ class TransformHelper:
                     #print "resta:", abs(x1-x2), "\n"
                     
                     occupancy.SetPoint(nhits,     x1, z)
+                    actualocc.SetPoint(actualhits,x1, z)
                     occupancy.SetPoint(nhits + 1, x2, z)
-                    nhits += 2
-                    nsegs += 1
-
+                    nhits      += 2
+                    actualhits += 1
+                    nsegs      += 1
+                    
     ##        for i in range(len(event.digi_wheel)):
     ##            if (event.digi_wheel[i]!=0): continue
     ##            if (event.digi_station[i]!=2): continue
@@ -233,12 +271,15 @@ class TransformHelper:
     ##            print "digi time: %f"   %(event.digi_time[i])
 
             ## if enough
-            if nhits > 20:
+            if nhits > self.nhits:
                 filled = True
             else:
                 for hit in range(nhits):
                     occupancy.RemovePoint(hit)
+                for hit in range(actualhits):
+                    actualocc.RemovePoint(hit)
         
+        f.Close()
         if not filled: wr.warn("> Not filled properly!", UserWarning, stacklevel=2)
         print "> Number of hits plotted:", nhits
         print "> Number of segments selected:", nsegs
@@ -258,11 +299,12 @@ class TransformHelper:
         occupancy.GetXaxis().SetTitle("x coordinate (in cm)")
         occupancy.GetYaxis().SetTitle("z coordinate (in cm)")
         occupancy.Draw("AP")
-
         self.print_canvas(c1, "Occupancy_MB{c}_Wh{w}_S{s}".format(c = txtmb, w = txtwh, s = txtse))
+        del c1
         
         ## now make HT
         linespace = self.makeHoughTransform(occupancy)
+        if self.doVarious: maxima, maximaerr = self.findLocalMaxima(linespace)
         c2 = r.TCanvas("c2", "HT", 700, 700)
         c2.SetLeftMargin(0.15)
         
@@ -271,18 +313,48 @@ class TransformHelper:
         linespace.GetYaxis().SetTitle("#rho (cm)")
         linespace.Draw("COLZ")
         self.print_canvas(c2, "HoughTransform_MB{c}_Wh{w}_S{s}".format(c = txtmb, w = txtwh, s = txtse))
-
-        ## Now try to find segments
-        (m,n) = self.findBestSegment(linespace)
+        del c2
         
-        segm = r.TF1("seg", "[0]*x+[1]", -150, 150)
-        segm.SetParameters(m,n)
-        c1.cd()
-        segm.SetLineColor(r.kRed)
-        segm.SetLineWidth(2)
-        segm.Draw("SAME")
+        c1 = r.TCanvas("c1", "Occupancy", 700, 700)
+        c1.SetLeftMargin(0.15)
+        occupancy.SetTitle("x-z hits")
+        occupancy.SetMarkerColor(r.kBlack)
+        occupancy.SetMinimum(-2)
+        occupancy.SetMaximum(30)
+        occupancy.SetMarkerStyle(5)
+        occupancy.SetMarkerSize(1)
+        occupancy.GetXaxis().SetRange(0, 250)
+        occupancy.GetXaxis().SetLimits(-140, 80)
+        occupancy.GetXaxis().SetTitle("x coordinate (in cm)")
+        occupancy.GetYaxis().SetTitle("z coordinate (in cm)")
+        occupancy.Draw("AP")
+        
+        actualocc.SetMarkerColor(r.kAzure)
+        actualocc.SetMarkerStyle(5)
+        actualocc.SetMarkerSize(1)
+        actualocc.Draw("P")
+        ## Now try to find segments
+        if not self.doVarious:
+            (m,n) = self.findBestSegment(linespace)
+            segm = r.TF1("seg", "[0]*x+[1]", -150, 150)
+            segm.SetParameters(m,n)
+            segm.SetLineColor(r.kRed)
+            segm.SetLineWidth(2)
+            segm.Draw("SAME")
+        else:
+            hmax = []
+            for i in range(len(maxima)):
+                tmpsegm = r.TF1("segmax_" + str(i), "[0]*x+[1]", -150, 150)
+                print maxima[i][0], maxima[i][1]
+                tmpsegm.SetParameters(maxima[i][0], maxima[i][1])
+                tmpsegm.SetLineColor(r.kRed)
+                tmpsegm.SetLineWidth(2)
+                hmax.append(copy.deepcopy(tmpsegm.Clone("segmax_" + str(i))))
+                del tmpsegm
+                hmax[-1].Draw("SAME")
+                
         self.print_canvas(c1, "Occupancy_MB{c}_Wh{w}_S{s}_fit".format(c = txtmb, w = txtwh, s = txtse))
-        f.Close()
+        del c1
         return
 
 
@@ -307,8 +379,13 @@ if __name__ == "__main__":
     hlpr = TransformHelper(inputfile)
     if not inFanae: hlpr.path = "/afs/cern.ch/user/f/folguera/www/private/L1TPhase2/DTwithHT_withRecHits1D/"
     else:           hlpr.path = "/nfs/fanae/user/vrbouza/www/Proyectos/trigger_primitives/results/houghtrans/"
-    hlpr.run(se=4, wh=-1)
-    #hlpr.run()
+    
+    hlpr.binsangle = 500
+    #hlpr.binsrho   = 500
+    hlpr.binsrho   = hlpr.binsangle
+    hlpr.doVarious = True
+    hlpr.nhits     = 20
+    hlpr.run(wh=-11)
     
     print "> Done!\n"
 
